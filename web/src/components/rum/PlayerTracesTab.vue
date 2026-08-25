@@ -212,7 +212,7 @@ import { useStore } from "vuex";
 import { useI18nTyped } from "@/types/i18n";
 import searchService from "@/services/search";
 import useStreams from "@/composables/useStreams";
-import { rumFieldSql, rumFieldNotNullSql } from "@/utils/rum/fields";
+import { rumFieldSql, rumFieldNotNullSql, padRumTraceId } from "@/utils/rum/fields";
 import { formatTimeWithSuffix, formatLargeNumber, generateTraceContext } from "@/utils/zincutils";
 import useHttpStreaming from "@/composables/useStreamingSearch";
 import OButton from "@/lib/core/Button/OButton.vue";
@@ -484,7 +484,9 @@ async function fetchTraces() {
     // Deduplicate by trace_id, keep first occurrence for view context
     const traceMap = new Map<string, any>();
     for (const hit of rumHits) {
-      const traceId = hit._trace_id;
+      // Padded here rather than at the query: the metadata map below is keyed by the
+      // traces stream's own `trace_id`, so the id must already be full length to match.
+      const traceId = padRumTraceId(hit._trace_id);
       if (!traceId || traceMap.has(traceId)) continue;
       const viewUrl = hit._view_url || hit.view_url || "";
       traceMap.set(traceId, {

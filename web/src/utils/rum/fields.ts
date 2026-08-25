@@ -46,6 +46,32 @@ export type RumInternalField =
 /** Preferred spelling first — new data wins when a row somehow carries both. */
 export const rumFieldNames = (field: string): [string, string] => [`_o2_${field}`, `_oo_${field}`];
 
+/** A W3C trace id is 128 bits, written as 32 hex characters; a 64-bit id is 16. */
+const TRACE_ID_HEX_LENGTH = 32;
+
+/** One past a whole 64-bit id, so nothing that could already be complete is widened. */
+const MIN_TRUNCATED_LENGTH = 17;
+
+const HEX_ONLY = /^[0-9a-f]+$/i;
+
+/**
+ * Restore the leading zeros the browser SDK drops from the RUM row's trace id.
+ *
+ * The SDK stores `traceId.toString(16)` but zero-pads the `traceparent` it puts on the wire,
+ * so the traces stream records the full 32 characters while the RUM row records fewer, and an
+ * exact-match join between the two never succeeds. Trace ids are timestamp-prefixed, so the
+ * stored value is short every time rather than occasionally.
+ *
+ * Only a value too long to be a whole 64-bit id is padded: `_rumdata` is shared with the
+ * mobile SDKs, and widening an id that is already complete would break a join that works.
+ */
+export function padRumTraceId(id: unknown): string {
+  const value = String(id ?? "");
+  if (value.length < MIN_TRUNCATED_LENGTH || value.length >= TRACE_ID_HEX_LENGTH) return value;
+  if (!HEX_ONLY.test(value)) return value;
+  return value.padStart(TRACE_ID_HEX_LENGTH, "0");
+}
+
 /**
  * Read an internal field off an ingested row under either spelling.
  * `??` rather than `||` so a legitimately falsy value (0, "") is not skipped in favour

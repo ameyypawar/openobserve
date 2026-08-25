@@ -612,6 +612,36 @@ describe("PlayerTracesTab", () => {
       );
     });
 
+    // Regression (#13733): the browser SDK writes `_oo.trace_id` via `toString(16)`,
+    // dropping leading zeros, while the traces stream records the zero-padded wire
+    // value. Correlating the two by exact match found nothing, so the tab always
+    // reported "no correlated traces". The ids below are the pair from that report.
+    it("correlates a RUM id that lost its leading zero with the padded traces id", async () => {
+      wrapper.unmount();
+
+      const unpadded = "19fea78dc677c518b8ef5882504cd6d"; // 31 chars, as stored on the RUM row
+      const padded = "019fea78dc677c518b8ef5882504cd6d"; // 32 chars, as stored in traces
+
+      setupSuccessfulMocks(
+        [createRumHit({ _trace_id: unpadded })],
+        [createTraceMetadata({ trace_id: padded })],
+      );
+
+      wrapper = mountComponent();
+      await flushPromises();
+
+      // The traces stream is queried with the padded id...
+      expect(mockFetchQueryDataWithHttpStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          queryReq: expect.objectContaining({ filter: `trace_id='${padded}'` }),
+        }),
+        expect.any(Object),
+      );
+      // ...and the returned metadata matches, so the trace is listed rather than
+      // dropped by the "only keep views present in traces" filter.
+      expect(wrapper.find('[data-test="table-row-0"]').exists()).toBe(true);
+    });
+
     it("should show empty state when metadata is unavailable for all RUM hits", async () => {
       wrapper.unmount();
 
