@@ -887,6 +887,20 @@ pub fn repack_records<'a>(
     }
 }
 
+/// The rows of a columnar path's entries as records with their timestamps, for a batch to repack.
+pub fn columnar_records(entries: Vec<ingester::Entry>) -> Result<Vec<(i64, Map<String, Value>)>> {
+    let batches: Vec<_> = entries.iter().filter_map(|e| e.batch.as_ref()).collect();
+    let records = config::utils::arrow::record_batches_to_json_rows(&batches)
+        .map_err(|e| Error::IngestionError(e.to_string()))?;
+    Ok(records
+        .into_iter()
+        .map(|record| {
+            let timestamp = record.get(TIMESTAMP_COL_NAME).and_then(Value::as_i64);
+            (timestamp.unwrap_or_default(), record)
+        })
+        .collect())
+}
+
 /// Calls the SnowflakeIdGenerator instance associated with this stream to generate a new i64 ID.
 pub fn generate_record_id(org_id: &str, stream_name: &str, stream_type: &StreamType) -> i64 {
     let key = format!("{org_id}/{stream_type}/{stream_name}");
@@ -1189,6 +1203,38 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(all.contains("bar"));
+    }
+
+    #[test]
+    fn test_columnar_records_read_each_row_back_with_its_timestamp() {
+        use columnar::{ColumnKind, ColumnarBuckets};
+        let schema = Schema::new(vec![
+            Field::new(TIMESTAMP_COL_NAME, DataType::Int64, false),
+            Field::new("k1", DataType::Utf8, true),
+            Field::new("n", DataType::Int64, true),
+        ]);
+        let mut buckets = ColumnarBuckets::new(StreamType::Logs, &schema);
+        let ts = 3_600_000_000;
+        for (offset, k1, n) in [(0, Some("a"), Some(7)), (1, None, None)] {
+            let bucket = buckets.bucket(ts + offset);
+            bucket.column(0, ColumnKind::Int64).append_i64(ts + offset);
+            if let Some(k1) = k1 {
+                bucket.column(1, ColumnKind::Utf8).append_str(k1);
+            }
+            if let Some(n) = n {
+                bucket.column(2, ColumnKind::Int64).append_i64(n);
+            }
+            bucket.finish_row(1);
+        }
+        let entries = buckets.into_entries("org", "s", None).unwrap();
+        let records = columnar_records(entries).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].0, ts);
+        assert_eq!(records[0].1["k1"], "a");
+        assert_eq!(records[0].1["n"], 7);
+        // a cell the row left empty is absent, as the JSON path leaves it
+        assert_eq!(records[1].0, ts + 1);
+        assert!(!records[1].1.contains_key("k1") && !records[1].1.contains_key("n"));
     }
 
     #[test]

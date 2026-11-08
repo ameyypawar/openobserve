@@ -65,7 +65,9 @@ use crate::{
         infra::config::{METRIC_CLUSTER_LEADER, METRIC_CLUSTER_MAP},
         meta::stream::SchemaRecords,
     },
-    ingestion::check_ingestion_allowed,
+    ingestion::{
+        check_ingestion_allowed, columnar_records, newly_enabled_uds_fields, repack_records,
+    },
     pipeline::batch_execution::ExecutablePipeline,
 };
 
@@ -663,7 +665,7 @@ pub async fn remote_write(
         finish_identity_columns(&mut json_data);
         let has_uds = matches!(user_defined_schema_map.get(&stream_name), Some(Some(_)));
         let min_timestamp = json_data.iter().map(|(_, ts, _)| *ts).min().unwrap_or(0);
-        let (schema, schema_key) = ingest::resolve_batch_schema(
+        let (mut schema, mut schema_key) = ingest::resolve_batch_schema(
             org_id,
             &stream_name,
             &mut metric_schema_map,
@@ -673,6 +675,25 @@ pub async fn remote_write(
             has_uds,
         )
         .await?;
+        // the columnar series were built under the replaced schema, so they are packed too
+        if let Some(fields) = newly_enabled_uds_fields(has_uds, metric_schema_map.get(&stream_name))
+            && let Some(columnar) = columnar_streams.remove(&stream_name)
+        {
+            let mut records = columnar_records(columnar.into_entries(org_id, &stream_name)?)?;
+            repack_records(records.iter_mut().map(|(_, record)| record), &fields);
+            json_data.extend(records.into_iter().map(|(ts, record)| (record, ts, None)));
+            let min_timestamp = json_data.iter().map(|(_, ts, _)| *ts).min().unwrap_or(0);
+            (schema, schema_key) = ingest::resolve_batch_schema(
+                org_id,
+                &stream_name,
+                &mut metric_schema_map,
+                &mut json_data,
+                |(record, ..)| record,
+                min_timestamp,
+                true,
+            )
+            .await?;
+        }
 
         let alerts =
             stream_alerts_map.get(&cache_stream_key(org_id, StreamType::Metrics, &stream_name));

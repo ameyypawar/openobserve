@@ -50,9 +50,9 @@ use crate::{
     alerts::alert::AlertExt,
     common::meta::stream::SchemaRecords,
     ingestion::{
-        PartitionMemo, TriggerAlertData, evaluate_trigger, newly_enabled_uds_fields,
-        repack_records, resolve_batch_schema, schema_records_to_entries, write_entries,
-        write_entries_synced,
+        PartitionMemo, TriggerAlertData, columnar_records, evaluate_trigger,
+        newly_enabled_uds_fields, repack_records, resolve_batch_schema, schema_records_to_entries,
+        write_entries, write_entries_synced,
     },
 };
 
@@ -418,7 +418,7 @@ async fn write_logs(
     stream_name: &str,
     status: &mut IngestionStatus,
     mut json_data: Vec<(i64, Map<String, Value>)>,
-    columnar: Option<columnar::JsonColumnar>,
+    mut columnar: Option<columnar::JsonColumnar>,
     is_derived: bool,
 ) -> Result<RequestStats> {
     let cfg = get_config();
@@ -497,7 +497,19 @@ async fn write_logs(
     )
     .await?;
     // the check that turned the UDS on projected the schema, which would drop unpacked columns
+    let packed_from = json_data.len();
+    let mut packed_ids: Vec<Option<String>> = Vec::new();
     if let Some(fields) = newly_enabled_uds_fields(has_uds, stream_schema_map.get(stream_name)) {
+        // the columnar rows were built under the schema the check replaced, so they are packed too
+        if let Some(columnar) = columnar.take() {
+            let records = columnar_records(columnar.into_entries(org_id)?)?;
+            // their items keep the action `_id`, which the pack moves into `_all` outside the UDS
+            packed_ids = records
+                .iter()
+                .map(|(_, record)| record.get("_id").and_then(Value::as_str).map(String::from))
+                .collect();
+            json_data.extend(records);
+        }
         repack_records(json_data.iter_mut().map(|(_, record)| record), &fields);
         (schema_evolution, infer_schema) = resolve_batch_schema(
             org_id,
@@ -531,10 +543,16 @@ async fn write_logs(
     let mut write_buf: HashMap<String, SchemaRecords> = HashMap::new();
     let mut partition_memo = PartitionMemo::new(&partition_keys, partition_time_level);
 
-    for (timestamp, mut record_val) in json_data {
-        let doc_id = record_val
-            .get("_id")
-            .map(|v| v.as_str().unwrap().to_string());
+    for (idx, (timestamp, mut record_val)) in json_data.into_iter().enumerate() {
+        let doc_id = match idx
+            .checked_sub(packed_from)
+            .and_then(|row| packed_ids.get(row))
+        {
+            Some(id) => id.clone(),
+            None => record_val
+                .get("_id")
+                .map(|v| v.as_str().unwrap().to_string()),
+        };
 
         // validate record
         if let Some(delta) = schema_evolution.types_delta.as_ref() {
