@@ -669,9 +669,10 @@ fn merge_loaded_metrics(results: Vec<LoadedMetrics>) -> HashMap<u64, RangeValue>
             LoadedMetrics::Merged(metrics) => vec![metrics],
         };
         for map in maps {
-            for (hash, value) in map {
+            for (hash, mut value) in map {
                 match metrics.entry(hash) {
                     hashbrown::hash_map::Entry::Occupied(mut entry) => {
+                        drop_copies(&mut value.samples, &entry.get().samples);
                         entry.get_mut().extend(value)
                     }
                     hashbrown::hash_map::Entry::Vacant(entry) => {
@@ -682,6 +683,20 @@ fn merge_loaded_metrics(results: Vec<LoadedMetrics>) -> HashMap<u64, RangeValue>
         }
     }
     metrics
+}
+
+/// Drops exact copies of `read`: a sample moving from the WAL to storage is in both.
+fn drop_copies(samples: &mut Vec<Sample>, read: &[Sample]) {
+    let identity = |sample: &Sample| (sample.timestamp, sample.value.to_bits());
+    let Some(first) = samples.iter().map(|sample| sample.timestamp).min() else {
+        return;
+    };
+    let overlap: hashbrown::HashSet<_> = read
+        .iter()
+        .filter(|sample| sample.timestamp >= first)
+        .map(identity)
+        .collect();
+    samples.retain(|sample| !overlap.contains(&identity(sample)));
 }
 
 #[cfg(test)]
@@ -735,6 +750,35 @@ mod tests {
         assert_eq!(metrics.len(), 2);
         assert_eq!(metrics[&11].samples.len(), 2);
         assert_eq!(metrics[&22].samples.len(), 1);
+    }
+
+    #[test]
+    fn test_merge_drops_only_exact_copies_across_contexts() {
+        let series = |samples: &[(i64, f64)]| RangeValue {
+            samples: samples.iter().map(|&(t, v)| Sample::new(t, v)).collect(),
+            ..Default::default()
+        };
+        let results = vec![
+            LoadedMetrics::Partitioned(vec![HashMap::from([(
+                11,
+                series(&[(100, 1.0), (200, 2.0), (200, 2.0)]),
+            )])]),
+            LoadedMetrics::Partitioned(vec![HashMap::from([(
+                11,
+                series(&[(200, 2.0), (200, 3.0), (300, 4.0)]),
+            )])]),
+        ];
+
+        let metrics = merge_loaded_metrics(results);
+        let samples: Vec<_> = metrics[&11]
+            .samples
+            .iter()
+            .map(|s| (s.timestamp, s.value))
+            .collect();
+        assert_eq!(
+            samples,
+            [(100, 1.0), (200, 2.0), (200, 2.0), (200, 3.0), (300, 4.0)]
+        );
     }
 
     #[test]
