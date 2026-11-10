@@ -80,14 +80,28 @@ impl TableProvider for StorageProvider {
         if matches_nothing(org_id, stream_name, &matchers).await? {
             return Ok(vec![]);
         }
-        let mut ctxs = Vec::new();
+        // read the WAL first: the mover adds a file to the list before it removes its segments
+        let wal_ctx_list = if self.need_wal {
+            let trace_id = self.trace_id.to_owned() + "-wal-" + stream_name;
+            wal::create_context(
+                &trace_id,
+                org_id,
+                stream_name,
+                time_range,
+                matchers.clone(),
+                label_selector.clone(),
+            )
+            .await?
+        } else {
+            vec![]
+        };
         let trace_id = self.trace_id.to_owned() + "-storage-" + stream_name;
         let ctx = storage::create_context(
             &trace_id,
             org_id,
             stream_name,
             time_range,
-            matchers.clone(),
+            matchers,
             filters,
             storage::SourcePreference {
                 streaming,
@@ -95,25 +109,7 @@ impl TableProvider for StorageProvider {
             },
         )
         .await?;
-        if let Some(ctx) = ctx {
-            ctxs.push(ctx);
-        }
-        if self.need_wal {
-            let trace_id = self.trace_id.to_owned() + "-wal-" + stream_name;
-            let wal_ctx_list = wal::create_context(
-                &trace_id,
-                org_id,
-                stream_name,
-                time_range,
-                matchers,
-                label_selector,
-            )
-            .await?;
-            for ctx in wal_ctx_list {
-                ctxs.push(ctx);
-            }
-        }
-        Ok(ctxs)
+        Ok(ctx.into_iter().chain(wal_ctx_list).collect())
     }
 
     #[cfg(feature = "enterprise")]
